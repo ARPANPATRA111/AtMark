@@ -1,8 +1,32 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# At-Mark Attendance Tracker
 
-# Getting Started
+A production-ready attendance tracking application built with React Native CLI, featuring MMKV storage for optimal performance, intuitive UI/UX, and comprehensive reporting capabilities.
 
-> **Note**: Make sure you have completed the [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
+## 🚀 Features
+
+- **Class Management**: Create, rename, and delete classes with predefined batch templates
+- **Student Management**: Add, edit, and remove students with roll numbers
+- **Attendance Tracking**: Quick and intuitive attendance marking with date selection
+- **Calendar View**: Visual attendance history for individual students
+- **PDF Export**: Generate detailed attendance reports with multi-page support
+- **MMKV Storage**: Lightning-fast zero-copy data persistence
+- **Swipe Actions**: Intuitive swipe-to-edit/delete functionality
+- **Haptic Feedback**: Enhanced user experience with tactile responses
+- **Responsive UI**: Beautiful, modern design with smooth animations
+
+## 📱 Tech Stack
+
+- **Framework**: React Native CLI 0.82.x
+- **Navigation**: @react-navigation/native + @react-navigation/stack
+- **Storage**: react-native-mmkv (fast, encrypted local storage)
+- **UI Components**: react-native-vector-icons, react-native-swipe-list-view, react-native-calendars, react-native-linear-gradient
+- **Export/Share**: react-native-html-to-pdf, react-native-share
+- **Utilities**: date-fns, react-native-haptic-feedback, @react-native-community/datetimepicker
+- **Type Safety**: TypeScript
+
+## 🛠️ Installation
+
+> **Note**: Make sure you have completed the [React Native Environment Setup](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
 
 ## Step 1: Start Metro
 
