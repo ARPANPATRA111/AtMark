@@ -12,6 +12,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
 import RNHTMLtoPDF from 'react-native-html-to-pdf';
+import RNFS from 'react-native-fs';
 import Share from 'react-native-share';
 import LinearGradient from 'react-native-linear-gradient';
 import { BaseScreen } from '../components/BaseScreen';
@@ -38,7 +39,9 @@ const hapticOptions = {
 export const ClassScreen = ({ route, navigation }: any) => {
   const { className } = route.params;
   const [students, setStudents] = useState<StudentData[]>([]);
-  const [editingStudent, setEditingStudent] = useState<string | null>(null);
+  const [searchMode, setSearchMode] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [editingStudentId, setEditingStudentId] = useState<string | null>(null);
   const [newName, setNewName] = useState('');
   const [isExporting, setIsExporting] = useState(false);
   const toast = useToast();
@@ -78,7 +81,7 @@ export const ClassScreen = ({ route, navigation }: any) => {
 
   const handleEditStudent = (student: StudentData) => {
     ReactNativeHapticFeedback.trigger('impactLight', hapticOptions);
-    setEditingStudent(student.rollNumber);
+    setEditingStudentId(student.id);
     setNewName(student.name);
   };
 
@@ -88,12 +91,18 @@ export const ClassScreen = ({ route, navigation }: any) => {
       return;
     }
 
+    const editingStudent = students.find(s => s.id === editingStudentId);
+    if (!editingStudent) return;
+
     try {
-      await updateStudentName(className, editingStudent!, newName.trim());
+      await updateStudentName(className, editingStudent.rollNumber, newName.trim());
       ReactNativeHapticFeedback.trigger('notificationSuccess', hapticOptions);
-      setEditingStudent(null);
-      setNewName('');
+      // Optimistic update so user sees immediate change
+      setStudents(prev => prev.map(s => s.id === editingStudentId ? { ...s, name: newName.trim() } : s));
+      // Ensure local DB is fully consistent — reload and then clear edit state
       await loadStudents();
+      setEditingStudentId(null);
+      setNewName('');
       toast.showToast({ message: 'Student updated', type: 'success' });
     } catch (error: any) {
       toast.showToast({ message: error?.message ?? 'Failed to update student', type: 'error' });
@@ -101,7 +110,7 @@ export const ClassScreen = ({ route, navigation }: any) => {
   };
 
   const handleCancelEdit = () => {
-    setEditingStudent(null);
+    setEditingStudentId(null);
     setNewName('');
   };
 
@@ -117,6 +126,7 @@ export const ClassScreen = ({ route, navigation }: any) => {
       actionLabel: 'Undo',
       onActionPress: async () => {
         try {
+          // Note: restored student will get new id from DB
           await addStudent(className, { name: student.name, rollNumber: student.rollNumber });
           await loadStudents();
           toast.showToast({ message: 'Restored', type: 'success' });
@@ -132,28 +142,6 @@ export const ClassScreen = ({ route, navigation }: any) => {
     ReactNativeHapticFeedback.trigger('impactLight', hapticOptions);
 
     try {
-      // Request storage permission on Android
-      if (Platform.OS === 'android') {
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
-          {
-            title: 'Storage Permission',
-            message: 'App needs access to your storage to save PDF files',
-            buttonNeutral: 'Ask Me Later',
-            buttonNegative: 'Cancel',
-            buttonPositive: 'OK',
-          }
-        );
-        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
-          toast.showToast({ 
-            message: 'Storage permission denied. Cannot export PDF.', 
-            type: 'error' 
-          });
-          setIsExporting(false);
-          return;
-        }
-      }
-
       const dates = await getAttendanceDates(className);
       if (dates.length === 0) {
         toast.showToast({ message: 'No attendance records yet for this class', type: 'warning' });
@@ -178,29 +166,35 @@ export const ClassScreen = ({ route, navigation }: any) => {
       // Generate HTML
       const html = generatePDFHTML(className, students, dates, attendanceData);
 
-      // Generate PDF
-      const options = {
-        html,
-        fileName: `${className.replace(/[^a-z0-9]/gi, '_')}_Attendance`,
-        directory: 'Documents',
-      };
+      // Use app-internal directory to avoid permission issues on Android 11+
+      const fileName = `${className.replace(/[^a-z0-9]/gi, '_')}_Attendance_${Date.now()}.pdf`;
+      const targetPath = `${RNFS.DocumentDirectoryPath}/${fileName}`;
 
+      // Generate PDF with RNHTMLtoPDF (writes to temp/cache)
       let file;
       try {
-        file = await RNHTMLtoPDF.convert(options);
+        file = await RNHTMLtoPDF.convert({
+          html,
+          fileName: fileName.replace('.pdf', ''),
+          base64: false,
+        });
       } catch (pdfError: any) {
         console.error('[PDF] Conversion error:', pdfError);
-        throw new Error('Failed to generate PDF. Please check app permissions.');
+        throw new Error('Failed to generate PDF.');
       }
 
       if (!file || !file.filePath) {
         throw new Error('PDF file path is undefined');
       }
+
+      // Copy to app document directory for safe access
+      await RNFS.copyFile(file.filePath, targetPath);
+      console.log('[PDF] Saved to:', targetPath);
       
-      // Share PDF
+      // Share PDF from app directory
       try {
         await Share.open({
-          url: `file://${file.filePath}`,
+          url: Platform.OS === 'android' ? `file://${targetPath}` : targetPath,
           type: 'application/pdf',
           title: `${className} Attendance Report`,
         });
@@ -311,17 +305,17 @@ export const ClassScreen = ({ route, navigation }: any) => {
   };
 
   const renderStudentItem = ({ item }: { item: StudentData }) => {
-    if (editingStudent === item.rollNumber) {
+    if (editingStudentId === item.id) {
       return (
         <View style={styles.editCard}>
           <View style={styles.editCardHeader}>
             <Text style={styles.editRollNumber}>{item.rollNumber}</Text>
             <View style={styles.editCardActions}>
               <TouchableOpacity onPress={handleSaveEdit} style={styles.saveButton}>
-                <Icon name="check" size={18} color={theme.colors.success} />
+                <Icon name="check" size={18} color="#fff" />
               </TouchableOpacity>
               <TouchableOpacity onPress={handleCancelEdit} style={styles.cancelEditButton}>
-                <Icon name="close" size={18} color={theme.colors.danger} />
+                <Icon name="close" size={18} color="#fff" />
               </TouchableOpacity>
             </View>
           </View>
@@ -390,10 +384,26 @@ export const ClassScreen = ({ route, navigation }: any) => {
               <Text style={styles.studentCount}>{students.length} Students</Text>
             </View>
           </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <TouchableOpacity onPress={() => setSearchMode(m => !m)} style={{ padding: 8 }}>
+              <Icon name="search" size={20} color={theme.colors.primary} />
+            </TouchableOpacity>
+          </View>
         </View>
       </LinearGradient>
 
-      {students.length === 0 ? (
+      {searchMode && (
+        <View style={{ paddingHorizontal: 16, paddingVertical: 8 }}>
+          <CustomTextInput
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder="Search students by name or roll"
+            iconName="search"
+            containerStyle={{ marginBottom: 8 }}
+          />
+        </View>
+      )}
+      { (students.length === 0) ? (
         <View style={styles.emptyState}>
           <Icon name="people-outline" size={80} color={theme.colors.gray400} />
           <Text style={styles.emptyStateText}>No students yet</Text>
@@ -403,9 +413,13 @@ export const ClassScreen = ({ route, navigation }: any) => {
         </View>
       ) : (
         <FlatList
-          data={students}
+          data={students.filter(s => {
+            if (!searchQuery) return true;
+            const q = searchQuery.toLowerCase();
+            return s.name.toLowerCase().includes(q) || s.rollNumber.toLowerCase().includes(q);
+          })}
           renderItem={renderStudentItem}
-          keyExtractor={(item) => item.rollNumber}
+          keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listContent}
         />
       )}
@@ -623,12 +637,12 @@ const styles = StyleSheet.create({
   saveButton: {
     padding: theme.spacing.sm,
     borderRadius: theme.borderRadius.md,
-    backgroundColor: theme.colors.success,
+    backgroundColor: theme.colors.primaryDark,
   },
   cancelEditButton: {
     padding: theme.spacing.sm,
     borderRadius: theme.borderRadius.md,
-    backgroundColor: theme.colors.danger,
+    backgroundColor: theme.colors.dangerDark,
   },
   editInputContainer: {
     marginHorizontal: theme.spacing.md,

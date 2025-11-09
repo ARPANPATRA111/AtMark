@@ -16,6 +16,9 @@ import { addClass, setStudents } from '../storage/storage';
 import { predefinedBatches, Batch } from '../data/batches';
 import { theme } from '../theme';
 import { useToast } from '../components/ToastProvider';
+import { pick } from '@react-native-documents/picker';
+import XLSX from 'xlsx';
+import RNFS from 'react-native-fs';
 
 const hapticOptions = {
   enableVibrateFallback: true,
@@ -25,6 +28,7 @@ const hapticOptions = {
 export const AddClassScreen = ({ navigation }: any) => {
   const [className, setClassName] = useState('');
   const [selectedBatch, setSelectedBatch] = useState<Batch | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
   const [error, setError] = useState('');
   const toast = useToast();
 
@@ -39,20 +43,63 @@ export const AddClassScreen = ({ navigation }: any) => {
       return;
     }
 
-    if (!selectedBatch) {
-      toast.showToast({ message: 'Please select a batch', type: 'warning' });
-      return;
-    }
-
     try {
       await addClass(className.trim());
-      await setStudents(className.trim(), selectedBatch.students);
+      // If a batch is selected and has students, set them. Otherwise create an empty class.
+      if (selectedBatch && selectedBatch.students && selectedBatch.students.length > 0) {
+        await setStudents(className.trim(), selectedBatch.students);
+      }
       ReactNativeHapticFeedback.trigger('notificationSuccess', hapticOptions);
       toast.showToast({ message: 'Class created', type: 'success' });
       navigation.goBack();
     } catch (error: any) {
       setError(error.message);
       toast.showToast({ message: error.message ?? 'Failed to create class', type: 'error' });
+    }
+  };
+
+  const handleCreateEmptyBatch = () => {
+    const id = `batch_empty_${Date.now()}`;
+    const batch: Batch = { id, name: 'Empty Batch', count: 0, students: [] };
+    setSelectedBatch(batch);
+    toast.showToast({ message: 'Empty batch selected', type: 'info' });
+  };
+
+  const handleImportExcel = async () => {
+    try {
+      setIsImporting(true);
+      const result = await pick({ mode: 'open', allowMultiSelection: false });
+      if (!result || result.length === 0) return;
+      const file = result[0];
+      const fileContent = await RNFS.readFile(file.uri, 'base64');
+      const workbook = XLSX.read(fileContent, { type: 'base64' });
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      const data = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][];
+      if (data.length === 0) {
+        toast.showToast({ message: 'Excel file is empty', type: 'warning' });
+        return;
+      }
+
+      const startRow = data[0]?.[0]?.toString().toLowerCase().includes('name') ? 1 : 0;
+      const students: any[] = [];
+      for (let i = startRow; i < data.length; i++) {
+        const row = data[i];
+        if (!row || row.length < 2) continue;
+        const name = (row[0] || '').toString().trim();
+        const roll = (row[1] || '').toString().trim();
+        if (!name || !roll) continue;
+        students.push({ name, rollNumber: roll });
+      }
+
+      const batch: Batch = { id: `import_${Date.now()}`, name: 'Imported Batch', count: students.length, students };
+      setSelectedBatch(batch);
+      toast.showToast({ message: `Imported ${students.length} students`, type: 'success' });
+    } catch (err: any) {
+      console.error('[Import] Error importing batch:', err);
+      toast.showToast({ message: 'Failed to import file', type: 'error' });
+    } finally {
+      setIsImporting(false);
     }
   };
 
@@ -104,6 +151,22 @@ export const AddClassScreen = ({ navigation }: any) => {
           error={error}
           iconName="class"
         />
+        <View style={{ marginTop: 12 }}>
+          <CustomButton
+            title={isImporting ? 'Importing...' : 'Import from Excel'}
+            onPress={handleImportExcel}
+            iconName="upload-file"
+            variant="secondary"
+            loading={isImporting}
+            style={{ marginBottom: 8 }}
+          />
+          <CustomButton
+            title="Create Empty Batch"
+            onPress={handleCreateEmptyBatch}
+            iconName="playlist-add"
+            variant="ghost"
+          />
+        </View>
         </View>
 
         <Text style={styles.sectionTitle}>Select Batch</Text>

@@ -8,6 +8,7 @@ const USER_SESSION_KEY = '@user_session';
 export type AttendanceMap = { [rollNumber: string]: 1 };
 
 export interface StudentData {
+  id: string; // UUID from WatermelonDB
   name: string;
   rollNumber: string;
 }
@@ -174,15 +175,16 @@ export async function getStudents(className: string): Promise<StudentData[]> {
       .fetch();
     
     return students
-      .map(s => ({ name: s.name, rollNumber: s.rollNumber }))
-      .sort((a, b) => parseInt(a.rollNumber) - parseInt(b.rollNumber));
+      .map(s => ({ id: s.id, name: s.name, rollNumber: s.rollNumber }))
+      // Sort alphabetically by student name to keep UI consistent
+      .sort((a, b) => a.name.localeCompare(b.name));
   } catch (error) {
     console.error('[Storage] Error loading students:', error);
     return [];
   }
 }
 
-export async function setStudents(className: string, list: StudentData[]): Promise<void> {
+export async function setStudents(className: string, list: Array<Omit<StudentData, 'id'>>): Promise<void> {
   const userId = await getCurrentUserId();
   if (!userId) throw new Error('User not logged in');
   
@@ -225,7 +227,7 @@ export async function setStudents(className: string, list: StudentData[]): Promi
   });
 }
 
-export async function addStudent(className: string, studentData: StudentData): Promise<void> {
+export async function addStudent(className: string, studentData: Omit<StudentData, 'id'>): Promise<void> {
   const userId = await getCurrentUserId();
   if (!userId) throw new Error('User not logged in');
   

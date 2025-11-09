@@ -92,7 +92,7 @@ export class SyncManager {
 
   /**
    * Push local WatermelonDB data to Supabase
-   * ⚡ Optimized to only sync active (non-deleted) records
+   * ⚡ Pushes both active AND deleted records to sync deletions across devices
    */
   private async pushToSupabase(userId: string): Promise<void> {
     try {
@@ -100,16 +100,13 @@ export class SyncManager {
       
       console.log('[Sync] 🚀 Pushing local data to Supabase for user:', userId);
       
-      // Get all ACTIVE local classes for this user (skip soft-deleted)
+      // Get ALL local classes for this user (including deleted ones to sync deletions)
       const classesCollection = database.collections.get('classes');
       const localClasses = await classesCollection
-        .query(
-          Q.where('user_id', userId),
-          Q.where('is_deleted', false) // Only sync active classes
-        )
+        .query(Q.where('user_id', userId))
         .fetch();
       
-      console.log(`[Sync] 📚 Found ${localClasses.length} active local classes to sync`);
+      console.log(`[Sync] 📚 Found ${localClasses.length} total local classes (including deleted) to sync`);
       
       if (localClasses.length === 0) {
         console.log('[Sync] ⚠️ No classes found in local database. Have you created any classes?');
@@ -117,32 +114,56 @@ export class SyncManager {
       }
       
       for (const classRecord of localClasses) {
-        // Sync class to Supabase
+        const classData: any = {
+          id: classRecord.id,
+          user_id: userId,
+          name: (classRecord as any).name,
+          is_deleted: (classRecord as any).isDeleted,
+          deleted_at: (classRecord as any).deletedAt?.toISOString() || null,
+          created_at: (classRecord as any).createdAt.toISOString(),
+          updated_at: (classRecord as any).updatedAt.toISOString(),
+        };
+
+        // Handle potential duplicate name conflict (23505 error)
+        // If upsert by id fails due to unique constraint on name, reconcile
         const { error: classError } = await supabase
           .from('classes')
-          .upsert({
-            id: classRecord.id,
-            user_id: userId,
-            name: (classRecord as any).name,
-            created_at: (classRecord as any).createdAt.toISOString(),
-            updated_at: (classRecord as any).updatedAt.toISOString(),
-          }, { onConflict: 'id' });
+          .upsert(classData, { onConflict: 'id' });
         
         if (classError) {
+          // Check if it's a duplicate name error (23505)
+          if (classError.code === '23505' && classError.message.includes('unique_active_class_name')) {
+            console.warn(`[Sync] ⚠️ Duplicate class name "${classData.name}" detected. Attempting reconciliation...`);
+            
+            // Query for existing cloud class with same name
+            const { data: existingClasses, error: queryError } = await supabase
+              .from('classes')
+              .select('id')
+              .eq('user_id', userId)
+              .eq('name', classData.name)
+              .eq('is_deleted', false)
+              .limit(1);
+            
+            if (!queryError && existingClasses && existingClasses.length > 0) {
+              const cloudClassId = existingClasses[0].id;
+              console.log(`[Sync] 🔄 Found existing cloud class with same name. Cloud ID: ${cloudClassId}, Local ID: ${classRecord.id}`);
+              console.log('[Sync] 💡 TIP: You may have duplicate classes. Consider using cloud ID or merging data.');
+              // Skip this class to avoid conflict; in production you'd want merge logic here
+              continue;
+            }
+          }
+          
           console.error('[Sync] Error syncing class:', classError);
           continue;
         }
         
-        // Sync ACTIVE students for this class only
+        // Sync ALL students for this class (including deleted to propagate soft-deletes)
         const studentsCollection = database.collections.get('students');
         const students = await studentsCollection
-          .query(
-            Q.where('class_id', classRecord.id),
-            Q.where('is_deleted', false) // Only sync active students
-          )
+          .query(Q.where('class_id', classRecord.id))
           .fetch();
         
-        console.log(`[Sync] Syncing ${students.length} active students for class ${(classRecord as any).name}`);
+        console.log(`[Sync] Syncing ${students.length} total students (incl. deleted) for class ${(classRecord as any).name}`);
         
         for (const student of students) {
           const { error: studentError } = await supabase
@@ -152,6 +173,8 @@ export class SyncManager {
               class_id: classRecord.id,
               roll_number: (student as any).rollNumber,
               name: (student as any).name,
+              is_deleted: (student as any).isDeleted,
+              deleted_at: (student as any).deletedAt?.toISOString() || null,
               created_at: (student as any).createdAt.toISOString(),
               updated_at: (student as any).updatedAt.toISOString(),
             }, { onConflict: 'id' });
@@ -161,28 +184,34 @@ export class SyncManager {
           }
         }
         
-        // ⚡ CRITICAL OPTIMIZATION: Sync attendance for this class
+        // ⚡ Sync attendance for this class (including any soft-deleted records)
         // Only "present" records are stored locally - no "absent" records!
         const attendanceCollection = database.collections.get('attendance');
         const attendanceRecords = await attendanceCollection
           .query(Q.where('class_id', classRecord.id))
           .fetch();
         
-        console.log(`[Sync] Syncing ${attendanceRecords.length} attendance records (ONLY present students)`);
+        console.log(`[Sync] Syncing ${attendanceRecords.length} attendance records (present students + any deleted)`);
         
         for (const attendance of attendanceRecords) {
+          const attendanceData: any = {
+            id: attendance.id,
+            student_id: (attendance as any).studentId,
+            class_id: classRecord.id,
+            date: (attendance as any).date,
+            status: (attendance as any).status,
+            notes: (attendance as any).notes,
+            created_at: (attendance as any).createdAt.toISOString(),
+            updated_at: (attendance as any).updatedAt.toISOString(),
+          };
+          
+          // Include is_deleted if your server schema has it (optional enhancement)
+          // attendanceData.is_deleted = (attendance as any).isDeleted || false;
+          // attendanceData.deleted_at = (attendance as any).deletedAt?.toISOString() || null;
+          
           const { error: attendanceError } = await supabase
             .from('attendance')
-            .upsert({
-              id: attendance.id,
-              student_id: (attendance as any).studentId,
-              class_id: classRecord.id,
-              date: (attendance as any).date,
-              status: (attendance as any).status, // Only 'present' or 'late'
-              notes: (attendance as any).notes,
-              created_at: (attendance as any).createdAt.toISOString(),
-              updated_at: (attendance as any).updatedAt.toISOString(),
-            }, { onConflict: 'id' });
+            .upsert(attendanceData, { onConflict: 'id' });
           
           if (attendanceError) {
             console.error('[Sync] Error syncing attendance:', attendanceError);
@@ -208,6 +237,29 @@ export class SyncManager {
       
       const Q = await import('@nozbe/watermelondb/QueryDescription');
       
+      // --- Migration: attach orphan local classes (created with old schema) to this user
+      try {
+        const classesCollectionLocal = database.collections.get('classes');
+        const allLocalClasses = await classesCollectionLocal.query().fetch();
+        let orphanCount = 0;
+        await database.write(async () => {
+          for (const lc of allLocalClasses) {
+            // Some older records may be missing userId; if so, attribute them to the current user
+            if (!(lc as any).userId) {
+              await lc.update((r: any) => {
+                r.userId = userId;
+              });
+              orphanCount++;
+            }
+          }
+        });
+        if (orphanCount > 0) {
+          console.log(`[Sync] 🩹 Migrated ${orphanCount} local classes to user ${userId}`);
+        }
+      } catch (migrationErr) {
+        console.warn('[Sync] Migration step failed (non-fatal):', migrationErr);
+      }
+
       // Fetch classes from Supabase
       const { data: cloudClasses, error: classesError } = await supabase
         .from('classes')
