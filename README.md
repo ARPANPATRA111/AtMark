@@ -1,28 +1,58 @@
-# At-Mark Attendance Tracker
+# AtMark - Attendance Tracker
 
-A production-ready attendance tracking application built with React Native CLI, featuring MMKV storage for optimal performance, intuitive UI/UX, and comprehensive reporting capabilities.
+A production-ready attendance tracking application built with React Native CLI, featuring WatermelonDB for robust offline-first data management, Supabase sync for multi-device support, and a beautiful modern UI.
+
+![Alt](./design.gif)
 
 ## 🚀 Features
 
-- **Class Management**: Create, rename, and delete classes with predefined batch templates
-- **Student Management**: Add, edit, and remove students with roll numbers
-- **Attendance Tracking**: Quick and intuitive attendance marking with date selection
-- **Calendar View**: Visual attendance history for individual students
-- **PDF Export**: Generate detailed attendance reports with multi-page support
-- **MMKV Storage**: Lightning-fast zero-copy data persistence
-- **Swipe Actions**: Intuitive swipe-to-edit/delete functionality
-- **Haptic Feedback**: Enhanced user experience with tactile responses
-- **Responsive UI**: Beautiful, modern design with smooth animations
+### Core Functionality
+- **Class Management**: Create, rename, and delete classes with PDf import support
+- **Student Management**: Add individual students or import entire batches from Excel files
+- **Attendance Tracking**: Quick and intuitive attendance marking with calendar date selection
+- **Attendance History**: Visual calendar view showing individual student attendance patterns
+- **Multi-Device Sync**: Cloud sync via Supabase - same account, same data across all devices
+- **PDF Export**: Export attendance reports in PDF format
+- **Search & Filter**: Quickly find students with real-time search functionality
+
+### Technical Highlights
+- **Offline-First**: WatermelonDB provides SQLite-based local storage with full offline capability
+- **Cloud Sync**: Automatic conflict resolution and multi-device data synchronization via Supabase
+- **Soft Deletes**: Recoverable deletion with cascade triggers for data integrity
+- **Optimistic UI**: Instant feedback with background data persistence
+- **Haptic Feedback**: Enhanced UX with tactile responses throughout the app
+- **Beautiful UI**: Modern design with smooth animations and intuitive interactions
 
 ## 📱 Tech Stack
 
-- **Framework**: React Native CLI 0.82.x
+### Core Framework
+- **React Native CLI**: 0.82.x
+- **TypeScript**: Full type safety across the codebase
 - **Navigation**: @react-navigation/native + @react-navigation/stack
-- **Storage**: react-native-mmkv (fast, encrypted local storage)
-- **UI Components**: react-native-vector-icons, react-native-swipe-list-view, react-native-calendars, react-native-linear-gradient
-- **Export/Share**: react-native-html-to-pdf, react-native-share
-- **Utilities**: date-fns, react-native-haptic-feedback, @react-native-community/datetimepicker
-- **Type Safety**: TypeScript
+
+### Data & Storage
+- **Database**: @nozbe/watermelondb (SQLite-based reactive database)
+- **Cloud Backend**: @supabase/supabase-js (Authentication, PostgreSQL sync)
+- **Local Storage**: @react-native-async-storage/async-storage
+- **Network**: @react-native-community/netinfo
+
+### UI Components
+- **Icons**: react-native-vector-icons (Material Icons)
+- **Gradients**: react-native-linear-gradient
+- **Calendars**: react-native-calendars
+- **Date Picker**: @react-native-community/datetimepicker
+- **Gestures**: react-native-gesture-handler
+- **Safe Areas**: react-native-safe-area-context
+
+### Import/Export
+- **Excel Import**: xlsx + react-native-fs + @react-native-documents/picker
+- **CSV Export**: Native JavaScript + react-native-share
+- **File System**: react-native-fs
+
+### Developer Experience
+- **Haptics**: react-native-haptic-feedback
+- **Utilities**: date-fns (date formatting)
+- **Environment**: react-native-dotenv
 
 ## 🛠️ Installation
 
