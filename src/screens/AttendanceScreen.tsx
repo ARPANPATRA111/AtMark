@@ -56,15 +56,46 @@ export const AttendanceScreen = ({ route, navigation }: any) => {
   const toast = useToast();
 
   const loadData = useCallback(async () => {
-    const loadedStudents = await getStudents(className);
-    const sorted = [...loadedStudents].sort((a, b) => a.name.localeCompare(b.name));
-    setStudents(sorted);
+    try {
+      if (!className) {
+        console.error('[AttendanceScreen] className is undefined');
+        return;
+      }
 
-    // Load existing attendance for selected date
-    const dateISO = toISODate(selectedDate);
-    const attendance = await getAttendance(className, dateISO);
-    setPresentMap(attendance);
-  }, [className, selectedDate]);
+      const loadedStudents = await getStudents(className);
+      
+      // Safety check: ensure loadedStudents is an array
+      if (!Array.isArray(loadedStudents)) {
+        console.error('[AttendanceScreen] loadedStudents is not an array');
+        setStudents([]);
+        setPresentMap({});
+        return;
+      }
+
+      const sorted = [...loadedStudents].sort((a, b) => {
+        const nameA = a?.name || '';
+        const nameB = b?.name || '';
+        return nameA.localeCompare(nameB);
+      });
+      setStudents(sorted);
+
+      // Load existing attendance for selected date
+      const dateISO = toISODate(selectedDate);
+      const attendance = await getAttendance(className, dateISO);
+      
+      // Safety check: ensure attendance is an object
+      if (attendance && typeof attendance === 'object') {
+        setPresentMap(attendance);
+      } else {
+        setPresentMap({});
+      }
+    } catch (error) {
+      console.error('[AttendanceScreen] Error loading data:', error);
+      toast.showToast({ message: 'Failed to load attendance data', type: 'error' });
+      setStudents([]);
+      setPresentMap({});
+    }
+  }, [className, selectedDate, toast]);
 
   useFocusEffect(
     useCallback(() => {
@@ -80,6 +111,11 @@ export const AttendanceScreen = ({ route, navigation }: any) => {
   };
 
   const togglePresence = (rollNumber: string) => {
+    if (!rollNumber) {
+      console.error('[AttendanceScreen] rollNumber is undefined');
+      return;
+    }
+
     ReactNativeHapticFeedback.trigger('impactLight', hapticOptions);
     setPresentMap(prev => {
       const newMap = { ...prev };
@@ -93,32 +129,65 @@ export const AttendanceScreen = ({ route, navigation }: any) => {
   };
 
   const handleSave = async () => {
-    const dateISO = toISODate(selectedDate);
-    await saveAttendance(className, dateISO, presentMap);
-    ReactNativeHapticFeedback.trigger('notificationSuccess', hapticOptions);
-    toast.showToast({ message: 'Attendance saved', type: 'success' });
-    // Navigate back after saving
-    setTimeout(() => navigation.goBack(), 300);
+    try {
+      if (!className) {
+        throw new Error('Class name is missing');
+      }
+
+      const dateISO = toISODate(selectedDate);
+      if (!dateISO) {
+        throw new Error('Invalid date');
+      }
+
+      await saveAttendance(className, dateISO, presentMap);
+      ReactNativeHapticFeedback.trigger('notificationSuccess', hapticOptions);
+      toast.showToast({ message: 'Attendance saved', type: 'success' });
+      // Navigate back after saving
+      setTimeout(() => navigation.goBack(), 300);
+    } catch (error: any) {
+      console.error('[AttendanceScreen] Error saving attendance:', error);
+      toast.showToast({ 
+        message: error?.message || 'Failed to save attendance', 
+        type: 'error' 
+      });
+    }
   };
 
   const handleDelete = async () => {
-    const previous = { ...presentMap };
-    const dateISO = toISODate(selectedDate);
-    await deleteAttendance(className, dateISO);
-    setPresentMap({});
-    ReactNativeHapticFeedback.trigger('notificationWarning', hapticOptions);
-    toast.showToast({
-      message: 'Attendance deleted',
-      type: 'warning',
-      actionLabel: 'Undo',
-      onActionPress: async () => {
-        await saveAttendance(className, dateISO, previous);
-        setPresentMap(previous);
-        toast.showToast({ message: 'Restored', type: 'success' });
-      },
-    });
-    // Navigate back after deleting
-    setTimeout(() => navigation.goBack(), 300);
+    try {
+      if (!className) {
+        throw new Error('Class name is missing');
+      }
+
+      const previous = { ...presentMap };
+      const dateISO = toISODate(selectedDate);
+      
+      if (!dateISO) {
+        throw new Error('Invalid date');
+      }
+
+      await deleteAttendance(className, dateISO);
+      setPresentMap({});
+      ReactNativeHapticFeedback.trigger('notificationWarning', hapticOptions);
+      toast.showToast({
+        message: 'Attendance deleted',
+        type: 'warning',
+        actionLabel: 'Undo',
+        onActionPress: async () => {
+          await saveAttendance(className, dateISO, previous);
+          setPresentMap(previous);
+          toast.showToast({ message: 'Restored', type: 'success' });
+        },
+      });
+      // Navigate back after deleting
+      setTimeout(() => navigation.goBack(), 300);
+    } catch (error: any) {
+      console.error('[AttendanceScreen] Error deleting attendance:', error);
+      toast.showToast({ 
+        message: error?.message || 'Failed to delete attendance', 
+        type: 'error' 
+      });
+    }
   };
 
   const handleImportAttendance = async () => {
@@ -333,14 +402,14 @@ export const AttendanceScreen = ({ route, navigation }: any) => {
           variant="danger"
           style={styles.button}
         />
-        <CustomButton
+        {/* <CustomButton
           title={isImporting ? "Importing..." : "Import"}
           onPress={handleImportAttendance}
           iconName="upload-file"
           variant="secondary"
           style={styles.button}
           disabled={isImporting}
-        />
+        /> */}
         <CustomButton
           title="Save Attendance"
           onPress={handleSave}

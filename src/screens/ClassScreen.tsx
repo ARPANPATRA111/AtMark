@@ -8,6 +8,7 @@ import {
   PermissionsAndroid,
   Platform,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
@@ -15,6 +16,7 @@ import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
 import RNPrint from 'react-native-print';
 import RNFS from 'react-native-fs';
 import Share from 'react-native-share';
+import * as DocumentPicker from '@react-native-documents/picker';
 import LinearGradient from 'react-native-linear-gradient';
 import { BaseScreen } from '../components/BaseScreen';
 import { CustomButton } from '../components/CustomButton';
@@ -26,7 +28,9 @@ import {
   deleteStudent,
   getAttendanceDates,
   getAttendance,
+  saveAttendance,
   StudentData,
+  AttendanceMap,
 } from '../storage/storage';
 import { formatISODateForDisplay } from '../utils/date';
 import { theme } from '../theme';
@@ -37,6 +41,26 @@ const hapticOptions = {
   ignoreAndroidSystemSettings: false,
 };
 
+interface AttendanceMetadata {
+  version: string;
+  className: string;
+  generatedAt: string;
+  totalStudents: number;
+  totalDays: number;
+  students: Array<{
+    id: string;
+    name: string;
+    rollNumber: string;
+  }>;
+  attendance: Array<{
+    date: string;
+    records: Array<{
+      rollNumber: string;
+      status: string;
+    }>;
+  }>;
+}
+
 export const ClassScreen = ({ route, navigation }: any) => {
   const { className } = route.params;
   const [students, setStudents] = useState<StudentData[]>([]);
@@ -45,14 +69,38 @@ export const ClassScreen = ({ route, navigation }: any) => {
   const [editingStudentId, setEditingStudentId] = useState<string | null>(null);
   const [newName, setNewName] = useState('');
   const [isExporting, setIsExporting] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const toast = useToast();
 
   const loadStudents = useCallback(async () => {
-    const loadedStudents = await getStudents(className);
-    // Sort by name
-    const sorted = [...loadedStudents].sort((a, b) => a.name.localeCompare(b.name));
-    setStudents(sorted);
-  }, [className]);
+    try {
+      if (!className) {
+        console.error('[ClassScreen] className is undefined');
+        return;
+      }
+      
+      const loadedStudents = await getStudents(className);
+      
+      // Safety check: ensure loadedStudents is an array
+      if (!Array.isArray(loadedStudents)) {
+        console.error('[ClassScreen] loadedStudents is not an array');
+        setStudents([]);
+        return;
+      }
+      
+      // Sort by name with safety checks
+      const sorted = [...loadedStudents].sort((a, b) => {
+        const nameA = a?.name || '';
+        const nameB = b?.name || '';
+        return nameA.localeCompare(nameB);
+      });
+      setStudents(sorted);
+    } catch (error) {
+      console.error('[ClassScreen] Error loading students:', error);
+      toast.showToast({ message: 'Failed to load students', type: 'error' });
+      setStudents([]);
+    }
+  }, [className, toast]);
 
   useFocusEffect(
     useCallback(() => {
@@ -87,13 +135,17 @@ export const ClassScreen = ({ route, navigation }: any) => {
   };
 
   const handleSaveEdit = async () => {
-    if (!newName.trim()) {
+    if (!newName?.trim()) {
       toast.showToast({ message: 'Student name cannot be empty', type: 'warning' });
       return;
     }
 
-    const editingStudent = students.find(s => s.id === editingStudentId);
-    if (!editingStudent) return;
+    const editingStudent = students.find(s => s?.id === editingStudentId);
+    if (!editingStudent || !editingStudent.rollNumber) {
+      toast.showToast({ message: 'Student not found', type: 'error' });
+      setEditingStudentId(null);
+      return;
+    }
 
     try {
       await updateStudentName(className, editingStudent.rollNumber, newName.trim());
@@ -169,8 +221,13 @@ export const ClassScreen = ({ route, navigation }: any) => {
     let targetPath: string | null = null;
 
     try {
+      // Safety checks
+      if (!className) {
+        throw new Error('Class name is missing');
+      }
+      
       // Check if there are students
-      if (students.length === 0) {
+      if (!students || students.length === 0) {
         toast.showToast({ message: 'No students in this class to export', type: 'warning' });
         setIsExporting(false);
         return;
@@ -304,6 +361,128 @@ export const ClassScreen = ({ route, navigation }: any) => {
         }
       }
       setIsExporting(false);
+    }
+  };
+
+  const handleImportAttendance = async () => {
+    if (isImporting) return;
+    
+    setIsImporting(true);
+    ReactNativeHapticFeedback.trigger('impactLight', hapticOptions);
+
+    try {
+      // Pick HTML file
+      const result = await DocumentPicker.pick({
+        type: [DocumentPicker.types.allFiles],
+        copyTo: 'cachesDirectory',
+      });
+
+      const file = result[0];
+      if (!file?.uri) {
+        throw new Error('No file selected');
+      }
+
+      console.log('[Import] Selected file:', file.uri);
+
+      // Read file content
+      const htmlContent = await RNFS.readFile(file.uri, 'utf8');
+      
+      // Extract metadata from HTML comment
+      const metadataMatch = htmlContent.match(/<!--ATMARK_METADATA_START\s*([\s\S]*?)\s*ATMARK_METADATA_END-->/);
+      
+      if (!metadataMatch) {
+        throw new Error('This is not a valid AtMark attendance export file. Please select an HTML file exported from this app.');
+      }
+
+      const metadata: AttendanceMetadata = JSON.parse(metadataMatch[1]);
+      
+      console.log('[Import] Metadata extracted:', metadata);
+
+      // Validate metadata
+      if (!metadata.version || !metadata.className || !metadata.attendance) {
+        throw new Error('Invalid file format');
+      }
+
+      // Check if class name matches
+      if (metadata.className !== className) {
+        const proceed = await new Promise<boolean>((resolve) => {
+          Alert.alert(
+            'Different Class',
+            `This file is from "${metadata.className}" but you're in "${className}". Do you want to continue?`,
+            [
+              { text: 'Cancel', onPress: () => resolve(false), style: 'cancel' },
+              { text: 'Continue', onPress: () => resolve(true) },
+            ]
+          );
+        });
+
+        if (!proceed) {
+          setIsImporting(false);
+          return;
+        }
+      }
+
+      // Get current students in the class
+      const currentStudents = await getStudents(className);
+      const currentStudentMap = new Map(currentStudents.map(s => [s.rollNumber, s]));
+
+      let importedCount = 0;
+      let skippedCount = 0;
+      let matchedStudents = 0;
+
+      // Process each attendance record
+      for (const attendanceDay of metadata.attendance) {
+        const { date, records } = attendanceDay;
+        
+        // Build attendance map for this date
+        const dayAttendance: AttendanceMap = {};
+        
+        for (const record of records) {
+          // Check if student exists in current class by roll number
+          if (currentStudentMap.has(record.rollNumber)) {
+            if (record.status === 'P') {
+              dayAttendance[record.rollNumber] = 1;
+              matchedStudents++;
+            }
+            // 'A' means absent, so we don't add to the map (absence is implicit)
+          } else {
+            skippedCount++;
+          }
+        }
+
+        // Save attendance for this date
+        try {
+          await saveAttendance(className, date, dayAttendance);
+          importedCount++;
+        } catch (error) {
+          console.error(`[Import] Error saving attendance for ${date}:`, error);
+        }
+      }
+
+      ReactNativeHapticFeedback.trigger('notificationSuccess', hapticOptions);
+      
+      Alert.alert(
+        'Import Successful',
+        `Imported ${importedCount} days of attendance.\n\n` +
+        `✓ ${matchedStudents} student records matched\n` +
+        (skippedCount > 0 ? `⚠ ${skippedCount} records skipped (student not found)` : ''),
+        [{ text: 'OK' }]
+      );
+
+    } catch (error: any) {
+      console.error('[Import] Error:', error);
+      
+      if (error.code === 'DOCUMENT_PICKER_CANCELED') {
+        console.log('[Import] User cancelled');
+      } else {
+        ReactNativeHapticFeedback.trigger('notificationError', hapticOptions);
+        toast.showToast({
+          message: error.message || 'Import failed. Please try again.',
+          type: 'error',
+        });
+      }
+    } finally {
+      setIsImporting(false);
     }
   };
 
@@ -787,6 +966,17 @@ export const ClassScreen = ({ route, navigation }: any) => {
             </View>
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <TouchableOpacity 
+              onPress={handleImportAttendance} 
+              style={{ padding: 8 }}
+              disabled={isImporting}
+            >
+              {isImporting ? (
+                <ActivityIndicator size="small" color={theme.colors.primary} />
+              ) : (
+                <Icon name="upload-file" size={22} color={theme.colors.primary} />
+              )}
+            </TouchableOpacity>
             <TouchableOpacity onPress={() => setSearchMode(m => !m)} style={{ padding: 8 }}>
               <Icon name="search" size={20} color={theme.colors.primary} />
             </TouchableOpacity>

@@ -222,9 +222,112 @@ export const DashboardScreen = ({ navigation }: any) => {
 
   const handleRefresh = async () => {
     ReactNativeHapticFeedback.trigger('impactLight', hapticOptions);
-    await loadClasses();
-    ReactNativeHapticFeedback.trigger('notificationSuccess', hapticOptions);
-    toast.showToast({ message: 'Refreshed', type: 'success' });
+    
+    try {
+      // First, sync local changes to cloud
+      if (isOnline && !isSyncing) {
+        await syncManager.syncToCloud();
+      }
+      
+      // Then pull new classes from Supabase (without overriding attendance)
+      await pullNewClassesFromSupabase();
+      
+      // Finally, refresh the local classes list
+      await loadClasses();
+      
+      ReactNativeHapticFeedback.trigger('notificationSuccess', hapticOptions);
+      toast.showToast({ message: 'Refreshed successfully', type: 'success' });
+    } catch (error) {
+      console.error('[Dashboard] Refresh error:', error);
+      toast.showToast({ message: 'Refresh failed', type: 'error' });
+    }
+  };
+
+  const pullNewClassesFromSupabase = async () => {
+    try {
+      const userId = await AsyncStorage.getItem(USER_SESSION_KEY);
+      if (!userId) return;
+      
+      const { userId: uid } = JSON.parse(userId);
+      if (!uid) return;
+
+      console.log('[Dashboard] Pulling classes from Supabase...');
+
+      // Fetch all classes from Supabase
+      const { data: cloudClasses, error } = await supabase
+        .from('classes')
+        .select('id, name, is_deleted, created_at, updated_at')
+        .eq('user_id', uid)
+        .eq('is_deleted', false);
+
+      if (error) {
+        console.error('[Dashboard] Error fetching classes:', error);
+        return;
+      }
+
+      if (!cloudClasses || cloudClasses.length === 0) {
+        console.log('[Dashboard] No classes found in Supabase');
+        return;
+      }
+
+      console.log(`[Dashboard] Found ${cloudClasses.length} classes in Supabase`);
+
+      // Get local classes
+      const localClasses = await getClasses();
+      const localClassSet = new Set(localClasses);
+
+      let newClassCount = 0;
+      let studentsSyncedCount = 0;
+
+      // Add new classes that don't exist locally
+      for (const cloudClass of cloudClasses) {
+        if (!localClassSet.has(cloudClass.name)) {
+          try {
+            console.log(`[Dashboard] Adding new class from cloud: ${cloudClass.name}`);
+            await addClass(cloudClass.name);
+            newClassCount++;
+
+            // Fetch students for this class
+            const { data: cloudStudents, error: studentsError } = await supabase
+              .from('students')
+              .select('roll_number, name')
+              .eq('class_id', cloudClass.id)
+              .eq('is_deleted', false);
+
+            if (!studentsError && cloudStudents && cloudStudents.length > 0) {
+              console.log(`[Dashboard] Adding ${cloudStudents.length} students to ${cloudClass.name}`);
+              await setStudents(
+                cloudClass.name,
+                cloudStudents.map(s => ({
+                  name: s.name,
+                  rollNumber: s.roll_number,
+                }))
+              );
+              studentsSyncedCount += cloudStudents.length;
+            }
+
+            // NOTE: We intentionally DO NOT sync attendance here to avoid overriding
+            // local offline attendance data. Attendance will only sync when user
+            // explicitly presses the sync button or uses export/import.
+          } catch (error) {
+            console.error(`[Dashboard] Error adding class ${cloudClass.name}:`, error);
+          }
+        }
+      }
+
+      if (newClassCount > 0) {
+        console.log(`[Dashboard] ✓ Added ${newClassCount} new classes with ${studentsSyncedCount} students`);
+        toast.showToast({
+          message: `Added ${newClassCount} new class${newClassCount > 1 ? 'es' : ''} from cloud`,
+          type: 'success',
+        });
+      } else {
+        console.log('[Dashboard] No new classes to add');
+      }
+    } catch (error) {
+      console.error('[Dashboard] Error in pullNewClassesFromSupabase:', error);
+      throw error;
+    }
   };
 
   // Track student counts
