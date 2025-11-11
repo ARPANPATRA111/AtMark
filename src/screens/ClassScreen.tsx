@@ -7,11 +7,12 @@ import {
   TouchableOpacity,
   PermissionsAndroid,
   Platform,
+  Alert,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import ReactNativeHapticFeedback from 'react-native-haptic-feedback';
-import RNHTMLtoPDF from 'react-native-html-to-pdf';
+import RNPrint from 'react-native-print';
 import RNFS from 'react-native-fs';
 import Share from 'react-native-share';
 import LinearGradient from 'react-native-linear-gradient';
@@ -137,11 +138,45 @@ export const ClassScreen = ({ route, navigation }: any) => {
     });
   };
 
+  const requestStoragePermission = async (): Promise<boolean> => {
+    if (Platform.OS !== 'android') {
+      return true;
+    }
+
+    try {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
+        {
+          title: 'Storage Permission',
+          message: 'This app needs access to storage to export PDF files.',
+          buttonNeutral: 'Ask Me Later',
+          buttonNegative: 'Cancel',
+          buttonPositive: 'OK',
+        }
+      );
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
+    } catch (err) {
+      console.warn('[PDF] Permission error:', err);
+      return false;
+    }
+  };
+
   const handleExportPDF = async () => {
     setIsExporting(true);
     ReactNativeHapticFeedback.trigger('impactLight', hapticOptions);
 
+    let generatedFilePath: string | null = null;
+    let targetPath: string | null = null;
+
     try {
+      // Check if there are students
+      if (students.length === 0) {
+        toast.showToast({ message: 'No students in this class to export', type: 'warning' });
+        setIsExporting(false);
+        return;
+      }
+
+      // Get attendance dates
       const dates = await getAttendanceDates(className);
       if (dates.length === 0) {
         toast.showToast({ message: 'No attendance records yet for this class', type: 'warning' });
@@ -149,13 +184,16 @@ export const ClassScreen = ({ route, navigation }: any) => {
         return;
       }
 
+      // Sort dates chronologically
+      const sortedDates = [...dates].sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
+
       // Build attendance data
       const attendanceData: { [rollNumber: string]: string[] } = {};
       students.forEach(student => {
         attendanceData[student.rollNumber] = [];
       });
 
-      for (const date of dates) {
+      for (const date of sortedDates) {
         const attendance = await getAttendance(className, date);
         students.forEach(student => {
           const isPresent = attendance[student.rollNumber] === 1;
@@ -163,51 +201,84 @@ export const ClassScreen = ({ route, navigation }: any) => {
         });
       }
 
-      // Generate HTML
-      const html = generatePDFHTML(className, students, dates, attendanceData);
+      // Generate HTML with escaped content
+      const html = generatePDFHTML(className, students, sortedDates, attendanceData);
 
       // Use app-internal directory to avoid permission issues on Android 11+
-      const fileName = `${className.replace(/[^a-z0-9]/gi, '_')}_Attendance_${Date.now()}.pdf`;
-      const targetPath = `${RNFS.DocumentDirectoryPath}/${fileName}`;
+      const sanitizedClassName = className.replace(/[^a-z0-9]/gi, '_');
+      const fileName = `${sanitizedClassName}_Attendance_${Date.now()}`;
+      targetPath = `${RNFS.DocumentDirectoryPath}/${fileName}.pdf`;
 
-      // Generate PDF with RNHTMLtoPDF (writes to temp/cache)
-      let file;
+      console.log('[PDF] Starting PDF generation...');
+      console.log('[PDF] Target path:', targetPath);
+
+      // Generate PDF using react-native-print
       try {
-        file = await RNHTMLtoPDF.convert({
+        const result = await RNPrint.print({
           html,
-          fileName: fileName.replace('.pdf', ''),
-          base64: false,
         });
-      } catch (pdfError: any) {
-        console.error('[PDF] Conversion error:', pdfError);
-        throw new Error('Failed to generate PDF.');
-      }
 
-      if (!file || !file.filePath) {
-        throw new Error('PDF file path is undefined');
-      }
+        const pdfPath = result?.filePath;
 
-      // Copy to app document directory for safe access
-      await RNFS.copyFile(file.filePath, targetPath);
-      console.log('[PDF] Saved to:', targetPath);
-      
-      // Share PDF from app directory
-      try {
-        await Share.open({
-          url: Platform.OS === 'android' ? `file://${targetPath}` : targetPath,
-          type: 'application/pdf',
-          title: `${className} Attendance Report`,
-        });
-      } catch (shareError: any) {
-        // User cancelled share - not an error
-        if (shareError.message !== 'User did not share') {
-          console.error('[PDF] Share error:', shareError);
-          throw new Error('Failed to share PDF');
+        if (pdfPath) {
+          generatedFilePath = pdfPath;
+          console.log('[PDF] PDF generated at:', pdfPath);
+
+          // Copy to app document directory for persistent storage
+          try {
+            await RNFS.copyFile(pdfPath, targetPath);
+            console.log('[PDF] Copied to:', targetPath);
+          } catch (copyError: any) {
+            console.warn('[PDF] Copy error, using original path:', copyError);
+            targetPath = pdfPath;
+          }
+
+          // Verify file exists
+          if (targetPath) {
+            const fileExists = await RNFS.exists(targetPath);
+            if (!fileExists) {
+              throw new Error('Generated PDF file does not exist');
+            }
+
+            console.log('[PDF] Sharing file from:', targetPath);
+            
+            // Share PDF file
+            try {
+              const shareUrl = Platform.OS === 'android' ? `file://${targetPath}` : targetPath;
+              await Share.open({
+                url: shareUrl,
+                type: 'application/pdf',
+                title: `${className} Attendance Report`,
+                subject: `Attendance Report - ${className}`,
+                filename: `${fileName}.pdf`,
+              });
+              
+              ReactNativeHapticFeedback.trigger('notificationSuccess', hapticOptions);
+              toast.showToast({ message: 'PDF exported successfully!', type: 'success' });
+            } catch (shareError: any) {
+              console.error('[PDF] Share error:', shareError);
+              // User cancelled share - not an error
+              if (shareError && (
+                shareError.message === 'User did not share' || 
+                shareError.message?.includes('cancelled') ||
+                shareError.message?.includes('cancel')
+              )) {
+                console.log('[PDF] User cancelled share');
+                toast.showToast({ message: 'PDF generated successfully', type: 'info' });
+              } else {
+                throw new Error(`Failed to share PDF: ${shareError.message || 'Unknown error'}`);
+              }
+            }
+          }
+        } else {
+          // If print dialog was used (no file path returned), print was sent directly
+          ReactNativeHapticFeedback.trigger('notificationSuccess', hapticOptions);
+          toast.showToast({ message: 'PDF sent to printer!', type: 'success' });
         }
+      } catch (printError: any) {
+        console.error('[PDF] Print error:', printError);
+        throw new Error(`PDF generation failed: ${printError.message || 'Unknown error'}`);
       }
-
-      ReactNativeHapticFeedback.trigger('notificationSuccess', hapticOptions);
-      toast.showToast({ message: 'PDF exported successfully!', type: 'success' });
     } catch (error: any) {
       console.error('[PDF] Export Error:', error);
       toast.showToast({ 
@@ -215,8 +286,31 @@ export const ClassScreen = ({ route, navigation }: any) => {
         type: 'error' 
       });
     } finally {
+      // Clean up temporary files
+      if (generatedFilePath && targetPath && generatedFilePath !== targetPath) {
+        try {
+          const tempExists = await RNFS.exists(generatedFilePath);
+          if (tempExists) {
+            await RNFS.unlink(generatedFilePath);
+            console.log('[PDF] Cleaned up temp file');
+          }
+        } catch (cleanupError) {
+          console.warn('[PDF] Cleanup error:', cleanupError);
+        }
+      }
       setIsExporting(false);
     }
+  };
+
+  const escapeHtml = (text: string): string => {
+    const map: { [key: string]: string } = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#039;'
+    };
+    return text.replace(/[&<>"']/g, m => map[m]);
   };
 
   const generatePDFHTML = (
@@ -226,29 +320,119 @@ export const ClassScreen = ({ route, navigation }: any) => {
     attendanceData: { [rollNumber: string]: string[] }
   ): string => {
     const totalDays = dates.length;
-    const datesPerPage = 18;
-    const studentsPerPage = 20;
+    const datesPerPage = 15; // Reduced for better formatting
+    const studentsPerPage = 25; // Increased for efficiency
+    
+    const escapedClassName = escapeHtml(className);
     
     let html = `
       <!DOCTYPE html>
       <html>
       <head>
+        <meta charset="UTF-8">
         <style>
-          body { font-family: Arial, sans-serif; font-size: 10px; margin: 20px; }
-          h1 { font-size: 18px; text-align: center; margin-bottom: 10px; }
-          h2 { font-size: 14px; margin-bottom: 10px; }
-          table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
-          th, td { border: 1px solid #ddd; padding: 4px; text-align: center; }
-          th { background-color: #4A90E2; color: white; font-weight: bold; }
-          .present { background-color: #E8F8F0; color: #27AE60; font-weight: bold; }
-          .absent { background-color: #FADBD8; color: #E74C3C; font-weight: bold; }
-          .summary { margin: 10px 0; font-weight: bold; }
-          .page-break { page-break-after: always; }
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body { 
+            font-family: 'Segoe UI', Arial, sans-serif; 
+            font-size: 9px; 
+            margin: 15px; 
+            color: #333;
+          }
+          h1 { 
+            font-size: 20px; 
+            text-align: center; 
+            margin-bottom: 8px; 
+            color: #2c3e50;
+            font-weight: 600;
+          }
+          h2 { 
+            font-size: 12px; 
+            margin: 12px 0 8px 0; 
+            color: #34495e;
+            font-weight: 500;
+          }
+          .summary { 
+            text-align: center;
+            margin: 8px 0 15px 0; 
+            font-size: 10px;
+            color: #7f8c8d;
+          }
+          table { 
+            width: 100%; 
+            border-collapse: collapse; 
+            margin-bottom: 20px;
+            font-size: 8px;
+          }
+          th, td { 
+            border: 1px solid #bdc3c7; 
+            padding: 5px 3px; 
+            text-align: center;
+            vertical-align: middle;
+          }
+          th { 
+            background-color: #3498db; 
+            color: white; 
+            font-weight: 600;
+            font-size: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+          }
+          .name-col { 
+            text-align: left; 
+            font-weight: 500;
+            max-width: 150px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+          }
+          .roll-col { 
+            font-weight: 600;
+            min-width: 50px;
+          }
+          .present { 
+            background-color: #d5f4e6; 
+            color: #27ae60; 
+            font-weight: 700;
+          }
+          .absent { 
+            background-color: #fadbd8; 
+            color: #e74c3c; 
+            font-weight: 700;
+          }
+          .stats-col {
+            background-color: #ecf0f1;
+            font-weight: 600;
+            color: #2c3e50;
+          }
+          .page-break { 
+            page-break-after: always; 
+          }
+          .footer {
+            margin-top: 15px;
+            padding-top: 10px;
+            border-top: 2px solid #3498db;
+            text-align: center;
+            font-size: 8px;
+            color: #7f8c8d;
+          }
+          @media print {
+            body { margin: 10px; }
+            .page-break { page-break-after: always; }
+          }
         </style>
       </head>
       <body>
-        <h1>Attendance Report: ${className}</h1>
-        <div class="summary">Total Students: ${students.length} | Total Days: ${totalDays}</div>
+        <h1>📋 Attendance Report: ${escapedClassName}</h1>
+        <div class="summary">
+          Generated on ${new Date().toLocaleDateString('en-US', { 
+            year: 'numeric', 
+            month: 'long', 
+            day: 'numeric' 
+          })}
+        </div>
+        <div class="summary">
+          Total Students: ${students.length} | Total Days: ${totalDays}
+        </div>
     `;
 
     // Paginate dates
@@ -261,42 +445,66 @@ export const ClassScreen = ({ route, navigation }: any) => {
         const studentEnd = Math.min(studentStart + studentsPerPage, students.length);
         const currentStudents = students.slice(studentStart, studentEnd);
 
+        const startDate = formatISODateForDisplay(currentDates[0]);
+        const endDate = formatISODateForDisplay(currentDates[currentDates.length - 1]);
+
         html += `
-          <h2>Dates: ${formatISODateForDisplay(currentDates[0])} to ${formatISODateForDisplay(currentDates[currentDates.length - 1])}</h2>
+          <h2>📅 Period: ${startDate} to ${endDate} | Students ${studentStart + 1}-${studentEnd}</h2>
           <table>
-            <tr>
-              <th>Roll No</th>
-              <th>Name</th>
-              ${currentDates.map(date => `<th>${date.substring(5)}</th>`).join('')}
-              <th>Present</th>
-            </tr>
+            <thead>
+              <tr>
+                <th class="roll-col">Roll No</th>
+                <th class="name-col">Name</th>
+                ${currentDates.map(date => {
+                  const formattedDate = formatISODateForDisplay(date);
+                  const shortDate = formattedDate.substring(0, 5); // MM/DD
+                  return `<th title="${formattedDate}">${shortDate}</th>`;
+                }).join('')}
+                <th class="stats-col">Present</th>
+                <th class="stats-col">%</th>
+              </tr>
+            </thead>
+            <tbody>
         `;
 
         currentStudents.forEach(student => {
+          const escapedName = escapeHtml(student.name);
           const studentDates = attendanceData[student.rollNumber].slice(dateStart, dateEnd);
           const presentCount = studentDates.filter(mark => mark === 'P').length;
+          const percentage = ((presentCount / currentDates.length) * 100).toFixed(1);
           
           html += `
             <tr>
-              <td>${student.rollNumber}</td>
-              <td style="text-align: left;">${student.name}</td>
+              <td class="roll-col">${escapeHtml(student.rollNumber)}</td>
+              <td class="name-col" title="${escapedName}">${escapedName}</td>
               ${studentDates.map(mark => 
                 `<td class="${mark === 'P' ? 'present' : 'absent'}">${mark}</td>`
               ).join('')}
-              <td>${presentCount}/${currentDates.length}</td>
+              <td class="stats-col">${presentCount}/${currentDates.length}</td>
+              <td class="stats-col">${percentage}%</td>
             </tr>
           `;
         });
 
-        html += `</table>`;
+        html += `
+            </tbody>
+          </table>
+        `;
         
-        if (!(studentEnd >= students.length && dateEnd >= dates.length)) {
+        // Add page break if not the last page
+        const isLastPage = (studentEnd >= students.length && dateEnd >= dates.length);
+        if (!isLastPage) {
           html += `<div class="page-break"></div>`;
         }
       }
     }
 
+    // Add footer
     html += `
+        <div class="footer">
+          <p>Generated by AtMark Attendance System</p>
+          <p>© ${new Date().getFullYear()} - All rights reserved</p>
+        </div>
       </body>
       </html>
     `;
