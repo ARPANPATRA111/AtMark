@@ -209,75 +209,80 @@ export const ClassScreen = ({ route, navigation }: any) => {
       const fileName = `${sanitizedClassName}_Attendance_${Date.now()}`;
       targetPath = `${RNFS.DocumentDirectoryPath}/${fileName}.pdf`;
 
-      console.log('[PDF] Starting PDF generation...');
-      console.log('[PDF] Target path:', targetPath);
+      console.log('[PDF] Starting report generation...');
+      console.log('[PDF] Total dates:', sortedDates.length);
+      console.log('[PDF] Total students:', students.length);
 
-      // Generate PDF using react-native-print
+      // Since react-native-print doesn't return file path reliably,
+      // we'll create an HTML file that can be opened and printed
       try {
-        const result = await RNPrint.print({
-          html,
-        });
-
-        const pdfPath = result?.filePath;
-
-        if (pdfPath) {
-          generatedFilePath = pdfPath;
-          console.log('[PDF] PDF generated at:', pdfPath);
-
-          // Copy to app document directory for persistent storage
-          try {
-            await RNFS.copyFile(pdfPath, targetPath);
-            console.log('[PDF] Copied to:', targetPath);
-          } catch (copyError: any) {
-            console.warn('[PDF] Copy error, using original path:', copyError);
-            targetPath = pdfPath;
-          }
-
-          // Verify file exists
-          if (targetPath) {
-            const fileExists = await RNFS.exists(targetPath);
-            if (!fileExists) {
-              throw new Error('Generated PDF file does not exist');
-            }
-
-            console.log('[PDF] Sharing file from:', targetPath);
-            
-            // Share PDF file
-            try {
-              const shareUrl = Platform.OS === 'android' ? `file://${targetPath}` : targetPath;
-              await Share.open({
-                url: shareUrl,
-                type: 'application/pdf',
-                title: `${className} Attendance Report`,
-                subject: `Attendance Report - ${className}`,
-                filename: `${fileName}.pdf`,
-              });
-              
-              ReactNativeHapticFeedback.trigger('notificationSuccess', hapticOptions);
-              toast.showToast({ message: 'PDF exported successfully!', type: 'success' });
-            } catch (shareError: any) {
-              console.error('[PDF] Share error:', shareError);
-              // User cancelled share - not an error
-              if (shareError && (
-                shareError.message === 'User did not share' || 
-                shareError.message?.includes('cancelled') ||
-                shareError.message?.includes('cancel')
-              )) {
-                console.log('[PDF] User cancelled share');
-                toast.showToast({ message: 'PDF generated successfully', type: 'info' });
-              } else {
-                throw new Error(`Failed to share PDF: ${shareError.message || 'Unknown error'}`);
-              }
-            }
-          }
-        } else {
-          // If print dialog was used (no file path returned), print was sent directly
-          ReactNativeHapticFeedback.trigger('notificationSuccess', hapticOptions);
-          toast.showToast({ message: 'PDF sent to printer!', type: 'success' });
+        // Create HTML file path
+        const htmlFilePath = `${RNFS.DocumentDirectoryPath}/${fileName}.html`;
+        
+        console.log('[PDF] Writing HTML file to:', htmlFilePath);
+        
+        // Write HTML to file
+        await RNFS.writeFile(htmlFilePath, html, 'utf8');
+        
+        // Verify file was created
+        const fileExists = await RNFS.exists(htmlFilePath);
+        if (!fileExists) {
+          throw new Error('Failed to create HTML file');
         }
-      } catch (printError: any) {
-        console.error('[PDF] Print error:', printError);
-        throw new Error(`PDF generation failed: ${printError.message || 'Unknown error'}`);
+
+        const fileSize = await RNFS.stat(htmlFilePath);
+        console.log('[PDF] HTML file created successfully, size:', fileSize.size, 'bytes');
+        
+        targetPath = htmlFilePath;
+        generatedFilePath = htmlFilePath;
+        
+        // Copy to Downloads folder for easy access
+        try {
+          const downloadPath = Platform.OS === 'android' 
+            ? `${RNFS.DownloadDirectoryPath}/${fileName}.html`
+            : htmlFilePath;
+          
+          console.log('[PDF] Target download path:', downloadPath);
+          
+          if (Platform.OS === 'android') {
+            await RNFS.copyFile(htmlFilePath, downloadPath);
+            console.log('[PDF] File copied to Downloads');
+          }
+          
+          // Try to share the file
+          try {
+            await Share.open({
+              url: `file://${downloadPath}`,
+              type: 'text/html',
+              title: `${className} Attendance Report`,
+              failOnCancel: false,
+            });
+          } catch (shareError: any) {
+            console.log('[PDF] Share cancelled or failed:', shareError?.message);
+            // If share fails, just notify user about the file location
+            if (Platform.OS === 'android') {
+              Alert.alert(
+                'File Saved',
+                `File saved to Downloads folder:\n${fileName}.html\n\nOpen in browser to print as PDF`,
+                [{ text: 'OK' }]
+              );
+            }
+          }
+          
+          ReactNativeHapticFeedback.trigger('notificationSuccess', hapticOptions);
+          toast.showToast({ 
+            message: Platform.OS === 'android' 
+              ? 'Report saved to Downloads! Open in browser to print' 
+              : 'Report exported! Open in browser and print to PDF', 
+            type: 'success' 
+          });
+        } catch (copyError: any) {
+          console.error('[PDF] Copy/Share error:', copyError);
+          throw new Error(`Failed to save report: ${copyError?.message || 'Unknown error'}`);
+        }
+      } catch (fileError: any) {
+        console.error('[PDF] File creation error:', fileError);
+        throw new Error(`Report generation failed: ${fileError.message || 'Unknown error'}`);
       }
     } catch (error: any) {
       console.error('[PDF] Export Error:', error);
@@ -320,168 +325,357 @@ export const ClassScreen = ({ route, navigation }: any) => {
     attendanceData: { [rollNumber: string]: string[] }
   ): string => {
     const totalDays = dates.length;
-    const datesPerPage = 15; // Reduced for better formatting
-    const studentsPerPage = 25; // Increased for efficiency
-    
     const escapedClassName = escapeHtml(className);
+    
+    // Group dates by month
+    const datesByMonth: { [monthKey: string]: string[] } = {};
+    dates.forEach(date => {
+      const dateObj = new Date(date);
+      const monthKey = `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}`;
+      if (!datesByMonth[monthKey]) {
+        datesByMonth[monthKey] = [];
+      }
+      datesByMonth[monthKey].push(date);
+    });
+    
+    // Sort month keys chronologically
+    const sortedMonthKeys = Object.keys(datesByMonth).sort();
+    
+    // Format date helper - shows DD format (just day)
+    const formatDateShort = (isoDate: string): string => {
+      try {
+        const date = new Date(isoDate);
+        return String(date.getDate()).padStart(2, '0');
+      } catch (e) {
+        return isoDate.substring(8); // Fallback to day
+      }
+    };
+    
+    // Get month name from monthKey (YYYY-MM)
+    const getMonthName = (monthKey: string): string => {
+      const [year, month] = monthKey.split('-');
+      const date = new Date(parseInt(year), parseInt(month) - 1, 1);
+      return date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    };
+    
+    // Prepare metadata for import functionality
+    const metadata = {
+      version: '1.0',
+      className: className,
+      generatedAt: new Date().toISOString(),
+      totalStudents: students.length,
+      totalDays: totalDays,
+      students: students.map(s => ({
+        id: s.id,
+        name: s.name,
+        rollNumber: s.rollNumber
+      })),
+      attendance: dates.map((date, dateIndex) => ({
+        date: date,
+        records: students.map(student => ({
+          rollNumber: student.rollNumber,
+          status: attendanceData[student.rollNumber][dateIndex]
+        }))
+      }))
+    };
     
     let html = `
       <!DOCTYPE html>
       <html>
       <head>
         <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Attendance Report - ${escapedClassName}</title>
         <style>
-          * { margin: 0; padding: 0; box-sizing: border-box; }
+          * { 
+            margin: 0; 
+            padding: 0; 
+            box-sizing: border-box; 
+          }
+          
+          @page {
+            size: A4 landscape;
+            margin: 10mm;
+          }
+          
           body { 
-            font-family: 'Segoe UI', Arial, sans-serif; 
-            font-size: 9px; 
-            margin: 15px; 
-            color: #333;
+            font-family: 'Arial', 'Helvetica', sans-serif; 
+            font-size: 8px; 
+            color: #000;
+            line-height: 1.2;
           }
-          h1 { 
-            font-size: 20px; 
-            text-align: center; 
-            margin-bottom: 8px; 
-            color: #2c3e50;
-            font-weight: 600;
-          }
-          h2 { 
-            font-size: 12px; 
-            margin: 12px 0 8px 0; 
-            color: #34495e;
-            font-weight: 500;
-          }
-          .summary { 
+          
+          .print-instructions {
+            background-color: #fff3cd;
+            border: 2px solid #ffc107;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 15px;
             text-align: center;
-            margin: 8px 0 15px 0; 
-            font-size: 10px;
-            color: #7f8c8d;
           }
+          
+          .print-instructions h3 {
+            color: #856404;
+            font-size: 16px;
+            margin-bottom: 10px;
+          }
+          
+          .print-instructions p {
+            color: #856404;
+            font-size: 12px;
+            margin: 5px 0;
+          }
+          
+          .print-button {
+            display: inline-block;
+            background-color: #007bff;
+            color: white;
+            padding: 12px 30px;
+            border-radius: 5px;
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: bold;
+            margin: 10px 5px;
+            cursor: pointer;
+            border: none;
+          }
+          
+          .print-button:hover {
+            background-color: #0056b3;
+          }
+          
+          @media print {
+            .print-instructions {
+              display: none !important;
+            }
+            body { margin: 0; }
+            .page-break { page-break-after: always; }
+            table { page-break-inside: avoid; }
+          }
+          
+          .header { 
+            text-align: center;
+            margin-bottom: 12px;
+            border-bottom: 2px solid #000;
+            padding-bottom: 8px;
+          }
+          
+          .header h1 { 
+            font-size: 16px; 
+            font-weight: bold;
+            margin-bottom: 4px;
+            text-transform: uppercase;
+          }
+          
+          .header .info { 
+            font-size: 9px;
+            margin: 2px 0;
+          }
+          
+          .section-header { 
+            font-size: 10px; 
+            font-weight: bold;
+            margin: 10px 0 5px 0; 
+            padding: 3px 5px;
+            background-color: #f0f0f0;
+            border-left: 3px solid #333;
+          }
+          
           table { 
             width: 100%; 
             border-collapse: collapse; 
-            margin-bottom: 20px;
-            font-size: 8px;
+            margin-bottom: 15px;
+            page-break-inside: avoid;
           }
+          
           th, td { 
-            border: 1px solid #bdc3c7; 
-            padding: 5px 3px; 
+            border: 1px solid #333; 
+            padding: 3px 2px; 
             text-align: center;
             vertical-align: middle;
+            font-size: 7px;
           }
+          
           th { 
-            background-color: #3498db; 
-            color: white; 
-            font-weight: 600;
-            font-size: 8px;
-            text-transform: uppercase;
-            letter-spacing: 0.3px;
-          }
-          .name-col { 
-            text-align: left; 
-            font-weight: 500;
-            max-width: 150px;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            background-color: #e0e0e0; 
+            font-weight: bold;
+            font-size: 7px;
             white-space: nowrap;
           }
-          .roll-col { 
-            font-weight: 600;
-            min-width: 50px;
+          
+          .col-sno { 
+            width: 25px;
+            font-weight: bold;
           }
-          .present { 
-            background-color: #d5f4e6; 
-            color: #27ae60; 
-            font-weight: 700;
+          
+          .col-roll { 
+            width: 50px;
+            font-weight: bold;
           }
-          .absent { 
-            background-color: #fadbd8; 
-            color: #e74c3c; 
-            font-weight: 700;
+          
+          .col-name { 
+            text-align: left; 
+            padding-left: 5px;
+            min-width: 100px;
+            max-width: 150px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
           }
-          .stats-col {
-            background-color: #ecf0f1;
-            font-weight: 600;
-            color: #2c3e50;
+          
+          .col-date {
+            width: 20px;
+            font-size: 6px;
+            writing-mode: vertical-rl;
+            text-orientation: mixed;
+            padding: 2px 1px;
           }
+          
+          .col-stats {
+            width: 35px;
+            background-color: #f9f9f9;
+            font-weight: bold;
+          }
+          
+          .mark-p { 
+            background-color: #c8e6c9; 
+            font-weight: bold;
+          }
+          
+          .mark-a { 
+            background-color: #ffcdd2; 
+            font-weight: bold;
+          }
+          
           .page-break { 
             page-break-after: always; 
           }
+          
           .footer {
-            margin-top: 15px;
-            padding-top: 10px;
-            border-top: 2px solid #3498db;
+            margin-top: 10px;
+            padding-top: 5px;
+            border-top: 1px solid #333;
             text-align: center;
-            font-size: 8px;
-            color: #7f8c8d;
+            font-size: 7px;
           }
+          
           @media print {
-            body { margin: 10px; }
+            body { margin: 0; }
             .page-break { page-break-after: always; }
+            table { page-break-inside: avoid; }
           }
         </style>
+        <script>
+          function printReport() {
+            window.print();
+          }
+          
+          function savePDF() {
+            // Trigger print dialog which allows saving as PDF
+            window.print();
+          }
+        </script>
       </head>
       <body>
-        <h1>📋 Attendance Report: ${escapedClassName}</h1>
-        <div class="summary">
-          Generated on ${new Date().toLocaleDateString('en-US', { 
-            year: 'numeric', 
-            month: 'long', 
-            day: 'numeric' 
-          })}
+        <!-- Instructions Banner (hidden when printing) -->
+        <div class="print-instructions">
+          <h3>📄 Attendance Report Ready!</h3>
+          <p>Click the button below to print or save as PDF</p>
+          <button onclick="printReport()" class="print-button">🖨️ Print / Save as PDF</button>
+          <p style="margin-top: 10px; font-size: 11px;">
+            <strong>Tip:</strong> In the print dialog, select "Save as PDF" as your printer destination
+          </p>
         </div>
-        <div class="summary">
-          Total Students: ${students.length} | Total Days: ${totalDays}
+        
+        <!-- Hidden metadata for import (embedded as JSON in HTML comment) -->
+        <!--ATMARK_METADATA_START
+        ${JSON.stringify(metadata, null, 2)}
+        ATMARK_METADATA_END-->
+        
+        <!-- Report Content -->
+        <div class="header">
+          <h1>Attendance Register</h1>
+          <div class="info"><strong>Class:</strong> ${escapedClassName}</div>
+          <div class="info"><strong>Period:</strong> ${formatISODateForDisplay(dates[0])} to ${formatISODateForDisplay(dates[dates.length - 1])}</div>
+          <div class="info"><strong>Total Students:</strong> ${students.length} | <strong>Total Days:</strong> ${totalDays} | <strong>Generated:</strong> ${new Date().toLocaleDateString()}</div>
         </div>
     `;
 
-    // Paginate dates
-    for (let dateStart = 0; dateStart < dates.length; dateStart += datesPerPage) {
-      const dateEnd = Math.min(dateStart + datesPerPage, dates.length);
-      const currentDates = dates.slice(dateStart, dateEnd);
-
-      // Paginate students
-      for (let studentStart = 0; studentStart < students.length; studentStart += studentsPerPage) {
-        const studentEnd = Math.min(studentStart + studentsPerPage, students.length);
+    // Organize by month - each month gets its own page(s)
+    sortedMonthKeys.forEach((monthKey, monthIndex) => {
+      const monthDates = datesByMonth[monthKey];
+      const monthName = getMonthName(monthKey);
+      const MAX_STUDENTS_PER_PAGE = 30;
+      
+      // Get attendance data indices for this month
+      const monthDateIndices = monthDates.map(date => dates.indexOf(date));
+      
+      // Paginate students if there are too many
+      for (let studentStart = 0; studentStart < students.length; studentStart += MAX_STUDENTS_PER_PAGE) {
+        const studentEnd = Math.min(studentStart + MAX_STUDENTS_PER_PAGE, students.length);
         const currentStudents = students.slice(studentStart, studentEnd);
-
-        const startDate = formatISODateForDisplay(currentDates[0]);
-        const endDate = formatISODateForDisplay(currentDates[currentDates.length - 1]);
+        
+        const pageInfo = students.length > MAX_STUDENTS_PER_PAGE 
+          ? `${monthName} | Students ${studentStart + 1}-${studentEnd} of ${students.length}`
+          : monthName;
 
         html += `
-          <h2>📅 Period: ${startDate} to ${endDate} | Students ${studentStart + 1}-${studentEnd}</h2>
+          <div class="section-header">📅 ${pageInfo}</div>
           <table>
             <thead>
               <tr>
-                <th class="roll-col">Roll No</th>
-                <th class="name-col">Name</th>
-                ${currentDates.map(date => {
-                  const formattedDate = formatISODateForDisplay(date);
-                  const shortDate = formattedDate.substring(0, 5); // MM/DD
-                  return `<th title="${formattedDate}">${shortDate}</th>`;
-                }).join('')}
-                <th class="stats-col">Present</th>
-                <th class="stats-col">%</th>
+                <th class="col-sno">S.No</th>
+                <th class="col-roll">Roll No</th>
+                <th class="col-name">Student Name</th>
+        `;
+
+        // Add date columns for this month (showing just day number)
+        monthDates.forEach(date => {
+          const dayNumber = formatDateShort(date);
+          const fullDate = formatISODateForDisplay(date);
+          html += `<th class="col-date" title="${fullDate}">${dayNumber}</th>`;
+        });
+
+        html += `
+                <th class="col-stats">Present</th>
+                <th class="col-stats">Absent</th>
+                <th class="col-stats">%</th>
               </tr>
             </thead>
             <tbody>
         `;
 
-        currentStudents.forEach(student => {
+        // Add student rows
+        currentStudents.forEach((student, index) => {
           const escapedName = escapeHtml(student.name);
-          const studentDates = attendanceData[student.rollNumber].slice(dateStart, dateEnd);
-          const presentCount = studentDates.filter(mark => mark === 'P').length;
-          const percentage = ((presentCount / currentDates.length) * 100).toFixed(1);
+          
+          // Get attendance marks for this student for this month's dates
+          const monthMarks = monthDateIndices.map(dateIdx => 
+            attendanceData[student.rollNumber][dateIdx]
+          );
+          
+          const presentCount = monthMarks.filter(mark => mark === 'P').length;
+          const absentCount = monthMarks.filter(mark => mark === 'A').length;
+          const percentage = monthDates.length > 0 
+            ? ((presentCount / monthDates.length) * 100).toFixed(0)
+            : '0';
           
           html += `
             <tr>
-              <td class="roll-col">${escapeHtml(student.rollNumber)}</td>
-              <td class="name-col" title="${escapedName}">${escapedName}</td>
-              ${studentDates.map(mark => 
-                `<td class="${mark === 'P' ? 'present' : 'absent'}">${mark}</td>`
-              ).join('')}
-              <td class="stats-col">${presentCount}/${currentDates.length}</td>
-              <td class="stats-col">${percentage}%</td>
+              <td class="col-sno">${studentStart + index + 1}</td>
+              <td class="col-roll">${escapeHtml(student.rollNumber)}</td>
+              <td class="col-name" title="${escapedName}">${escapedName}</td>
+          `;
+
+          // Add attendance marks for this month
+          monthMarks.forEach(mark => {
+            html += `<td class="mark-${mark.toLowerCase()}">${mark}</td>`;
+          });
+
+          html += `
+              <td class="col-stats">${presentCount}</td>
+              <td class="col-stats">${absentCount}</td>
+              <td class="col-stats">${percentage}%</td>
             </tr>
           `;
         });
@@ -491,19 +685,19 @@ export const ClassScreen = ({ route, navigation }: any) => {
           </table>
         `;
         
-        // Add page break if not the last page
-        const isLastPage = (studentEnd >= students.length && dateEnd >= dates.length);
-        if (!isLastPage) {
+        // Add page break after each month (except last month with last student batch)
+        const isLastMonth = (monthIndex === sortedMonthKeys.length - 1);
+        const isLastStudentBatch = (studentEnd >= students.length);
+        if (!(isLastMonth && isLastStudentBatch)) {
           html += `<div class="page-break"></div>`;
         }
       }
-    }
+    });
 
     // Add footer
     html += `
         <div class="footer">
-          <p>Generated by AtMark Attendance System</p>
-          <p>© ${new Date().getFullYear()} - All rights reserved</p>
+          <p><strong>AtMark Attendance System</strong> | Generated on ${new Date().toLocaleString()} | © ${new Date().getFullYear()}</p>
         </div>
       </body>
       </html>
