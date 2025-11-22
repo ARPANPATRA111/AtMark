@@ -4,6 +4,12 @@ A production-ready attendance tracking application built with React Native CLI, 
 
 ![Alt](./design.gif)
 
+## 📥 Download
+
+Download the latest version from [GitHub Releases](https://github.com/ARPANPATRA111/AtMark/releases/latest)
+
+[![Download APK](https://img.shields.io/github/v/release/ARPANPATRA111/AtMark?label=Download%20APK&style=for-the-badge&logo=android)](https://github.com/ARPANPATRA111/AtMark/releases/latest/download/atmark-v1.0.0.apk)
+
 ## 🚀 Features
 
 ### Core Functionality
